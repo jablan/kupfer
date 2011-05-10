@@ -79,6 +79,8 @@ def clear_queue():
 def get_player_id():
 	bus = dbus.SessionBus()
 	players_running = [ name for name in bus.list_names() if MPRIS_RE.match(name) ]
+	if not players_running:
+		return None
 	if 'org.mpris.%s' % _default_client() in players_running:
 		handle = _default_client()
 	else:
@@ -120,9 +122,16 @@ def get_playlist_songs():
 	
 	for i in range(tracklist.GetLength()):
 		song = tracklist.GetMetadata(i)
-		artist = str(song['artist'])
-		title = str(song['title'])
-		yield (i, artist + " - " + title)
+		if 'title' in song:
+			if 'artist' in song:
+				res = "%s - %s" % (song['artist'], song['title'])
+			else:
+				res = song['title']
+		elif 'location' in song:
+			res = song['location']
+		else:
+			res = _('Unnamed')
+		yield (i, res)
 
 class Enqueue (Action):
 	def __init__(self):
@@ -131,6 +140,7 @@ class Enqueue (Action):
 		yield FileLeaf
 
 	def valid_for_item(self, fileobj):
+		""" TODO: include other types, or determine sound files other way """
 		return fileobj.object.endswith(".mp3")
 
 	def activate(self, fileobj):
@@ -166,7 +176,7 @@ class Dequeue (Action):
 	def activate(self, leaf):
 		dequeue_song(leaf.object)
 	def get_description(self):
-		return _("Remove track from the audio player play queue")
+		return _("Remove track from %s play queue") % get_player_id()
 	def get_gicon(self):
 		return icons.ComposedIcon("gtk-execute", "media-playback-stop")
 	def get_icon_name(self):
@@ -178,7 +188,7 @@ class JumpToSong(Action):
 	def activate(self, leaf):
 		play_song(leaf.object)
 	def get_description(self):
-		return _("Jump to track in audio player")
+		return _("Jump to track in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playback-start"
 
@@ -188,7 +198,7 @@ class Play (RunnableLeaf):
 	def run(self):
 		_get_player().Play()
 	def get_description(self):
-		return _("Resume playback in audio player")
+		return _("Resume playback in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playback-start"
 
@@ -198,7 +208,7 @@ class Stop (RunnableLeaf):
 	def run(self):
 		_get_player().Stop()
 	def get_description(self):
-		return _("Stops playback in audio player")
+		return _("Stops playback in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playback-stop"
 
@@ -208,7 +218,7 @@ class Pause (RunnableLeaf):
 	def run(self):
 		_get_player().Pause()
 	def get_description(self):
-		return _("Pause playback in audio player")
+		return _("Pause playback in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playback-pause"
 
@@ -218,7 +228,7 @@ class Next (RunnableLeaf):
 	def run(self):
 		_get_player().Next()
 	def get_description(self):
-		return _("Jump to next track in audio player")
+		return _("Jump to next track in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-skip-forward"
 
@@ -228,7 +238,7 @@ class Previous (RunnableLeaf):
 	def run(self):
 		_get_player().Prev()
 	def get_description(self):
-		return _("Jump to previous track in audio player")
+		return _("Jump to previous track in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-skip-backward"
 
@@ -238,7 +248,7 @@ class ClearQueue (RunnableLeaf):
 	def run(self):
 		clear_queue()
 	def get_description(self):
-		return _("Clear the audio player play queue")
+		return _("Clear the %s play queue") % get_player_id()
 	def get_icon_name(self):
 		return "edit-clear"
 		
@@ -248,7 +258,7 @@ class Shuffle (RunnableLeaf):
 	def run(self):
 		toggle_shuffle()
 	def get_description(self):
-		return _("Toggle shuffle in music player")
+		return _("Toggle shuffle in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playlist-shuffle"
 
@@ -258,7 +268,7 @@ class Repeat (RunnableLeaf):
 	def run(self):
 		toggle_repeat()
 	def get_description(self):
-		return _("Toggle repeat in music player")
+		return _("Toggle repeat in %s") % get_player_id()
 	def get_icon_name(self):
 		return "media-playlist-repeat"
 
@@ -298,6 +308,12 @@ class MPRISSource (AppLeafContentMixin, Source):
 			"TrackListChange",
 			dbus_interface="org.freedesktop.MediaPlayer",
 			path="/TrackList")
+		nbo_callback = DbusWeakCallback(self._new_bus_object_callback)
+		nbo_callback.token = session_bus.add_signal_receiver(
+			nbo_callback,
+			"NameOwnerChanged",
+			dbus_interface="org.freedesktop.DBus",
+			path="/org/freedesktop/DBus")
 
 #		pretty.print_debug('end of initialize')
 		self.mark_for_update()
@@ -306,22 +322,29 @@ class MPRISSource (AppLeafContentMixin, Source):
 #		pretty.print_debug("Signal received!")
 #		pretty.print_debug(obj)
 		self.mark_for_update()
+	def _new_bus_object_callback(self, name, old_owner, new_owner):
+		"""Callback for new dbus object (starting and stopping players)"""
+		if MPRIS_RE.match(name):
+			# MPRIS-supporting player started or stopped
+			pretty.print_debug('new dbus object')
+			self.mark_for_update()
 	def get_items(self):
-		yield Play()
-		yield Stop()
-		yield Pause()
-		yield Next()
-		yield Previous() 
-		yield ClearQueue()
-		# Commented as these seem to have no effect
-		#yield Shuffle()
-		#yield Repeat()
-		songs = list(get_playlist_songs())
-		songs_source = MPRISSongsSource(songs)
-		yield SourceLeaf(songs_source)
-		if __kupfer_settings__["playlist_toplevel"]:
-			for leaf in songs_source.get_leaves():
-				yield leaf
+		if get_player_id():
+			yield Play()
+			yield Stop()
+			yield Pause()
+			yield Next()
+			yield Previous() 
+			yield ClearQueue()
+			# Commented as these seem to have no effect
+			#yield Shuffle()
+			#yield Repeat()
+			songs = list(get_playlist_songs())
+			songs_source = MPRISSongsSource(songs)
+			yield SourceLeaf(songs_source)
+			if __kupfer_settings__["playlist_toplevel"]:
+				for leaf in songs_source.get_leaves():
+					yield leaf
 	def get_description(self):
 		return __description__
 	def get_icon_name(self):
